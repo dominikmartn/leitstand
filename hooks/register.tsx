@@ -241,6 +241,11 @@ export const register: Register = on => {
     if (!active && explicit !== true) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
+    // The band above the prompt is shared: draw our rows, then what the mods after us draw, so their lines stay
+    const keep = async (mine: unknown) => {
+      const theirs = await next(e)
+      return theirs ? <Box flexDirection="column">{mine as never}{theirs as never}</Box> : mine
+    }
     const loud = th === 'loud'
     const spin = SPIN[f % SPIN.length]
     const diskColor = lv === 'bad' ? C.bad : lv === 'warn' ? C.warn : C.clay
@@ -325,7 +330,7 @@ export const register: Register = on => {
       const joined = parts.flatMap((p, i) => (i ? [<Text dimColor>{'  ·  '}</Text>, p] : [p]))
       // Nothing to count: /stand hangs on the last row instead of standing alone
       const hang = parts.length ? null : g ? 'block' : !isOpen && ctxHigh ? 'ctx' : null
-      return (
+      return keep(
         <Box flexDirection="column">
           {list}
           {!isOpen && ctxHigh && ctxRow(hang === 'ctx')}
@@ -346,7 +351,7 @@ export const register: Register = on => {
     if (!isOpen && s.running) parts.push(<Text><Text color={C.clay}>{spin} </Text>{s.running} running</Text>)
     // Without a footer, /stand hangs on the last row
     const last = isOpen || parts.length ? null : g ? 'block' : ctxHigh ? 'ctx' : 'disk'
-    return (
+    return keep(
       <Box flexDirection="column">
         {list}
         {diskNeeds && !isOpen && diskRow(last === 'disk')}
