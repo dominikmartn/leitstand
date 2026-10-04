@@ -303,3 +303,34 @@ test('loud: /stand folds the list to the footer, nothing running means nothing s
   expect(folded).not.toContain('Caltrack Build 32')
   expect(folded).toContain('1 running')
 })
+
+// How it can fail: Leitstand replaces the shared band and the lines of other mods disappear while a job runs
+test('Keeps the lines other mods draw above the prompt', async ($, on) => {
+  mock.clock(on, { now: 1_790_000_000_000 })
+  mock.env(on, { LEITSTAND_THEME: 'loud' })
+  mock.store(on)
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['OTHER-MOD-LINE'] }))
+  on('process.run', () => ran(REAL))
+  on('tool.call', () => ({ result: {}, text: 'Command running in background with ID: b7xk2.' }))
+  expect(await band($)).toBe('OTHER-MOD-LINE')
+  await $.tool.call({ tool: 'Bash', command: 'sleep 9', description: 'Caltrack Build 32', run_in_background: true, tool_use_id: 'toolu_1' } as never)
+  const t = await band($)
+  expect(t).toContain('1 running')
+  expect(t).toContain('OTHER-MOD-LINE')
+  // Folded keeps them too
+  await $.command.run({ command: 'stand', args: '' })
+  expect(await band($)).toContain('OTHER-MOD-LINE')
+})
+
+test('Quiet theme keeps the lines other mods draw above the prompt', async ($, on) => {
+  mock.clock(on, { now: 1_790_000_000_000 })
+  mock.env(on, { LEITSTAND_THEME: 'quiet' })
+  mock.store(on)
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['OTHER-MOD-LINE'] }))
+  on('process.run', () => ran(REAL))
+  on('tool.call', () => ({ result: {}, text: 'Command running in background with ID: b7xk2.' }))
+  await $.tool.call({ tool: 'Bash', command: 'sleep 9', description: 'Caltrack Build 32', run_in_background: true, tool_use_id: 'toolu_1' } as never)
+  const t = await band($)
+  expect(t).toContain('1 running')
+  expect(t).toContain('OTHER-MOD-LINE')
+})
