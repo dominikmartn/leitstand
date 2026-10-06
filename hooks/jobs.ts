@@ -29,6 +29,13 @@ export function summary(jobs: Job[], diskNeeds: boolean) {
   return { running: count('running'), done: count('done'), failed, needs: failed + (diskNeeds ? 1 : 0) }
 }
 
+// A TaskStop sends no <task-notification>: stopped, or already gone, means the job is not running.
+// A hook that blocks the stop leaves it running.
+export function stopEnds(ran: { deny?: string; isError?: boolean; text?: string }): boolean {
+  if (ran.deny !== undefined) return false
+  return !ran.isError || /No task found|not running/i.test(ran.text ?? '')
+}
+
 export type Ending = { id: string; status: Job['status'] }
 
 // Ended jobs stay until seen: loud shows them, quiet hides them.

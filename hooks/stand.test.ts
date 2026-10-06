@@ -278,6 +278,25 @@ test('Only engine-stamped notifications end jobs, early ones wait for their job'
   expect(t).toContain('1 running')
 })
 
+// How it can fail: a stop sends no <task-notification>, so a stopped job shows "running" for good
+test('TaskStop ends the job, also when the task is already gone; a blocked stop does not', async ($, on) => {
+  world(on, {})
+  let stop: Record<string, unknown> = { result: {}, text: 'PreToolUse:TaskStop hook error: blocked', isError: true }
+  let id = 0
+  on('tool.call', (_: unknown, e: any) => e.tool === 'TaskStop' ? stop : { result: {}, text: `Command running in background with ID: b${++id}.` })
+  for (const d of ['Tunnel 1', 'Tunnel 2'])
+    await $.tool.call({ tool: 'Bash', command: 'ssh -N mini', description: d, run_in_background: true, tool_use_id: d } as never)
+  const halt = (task: string) => $.tool.call({ tool: 'TaskStop', task_id: task, tool_use_id: `stop-${task}` } as never)
+  await halt('b1')
+  expect(await band($)).toContain('2 running')
+  stop = { result: {}, text: '{"message":"Successfully stopped task: b1 (ssh -N mini)"}' }
+  await halt('b1')
+  expect(await band($)).toContain('1 running')
+  stop = { result: {}, text: '<tool_use_error>No task found with ID: b2</tool_use_error>', isError: true }
+  await halt('b2')
+  expect(await band($)).not.toContain('running')
+})
+
 // How it can fail: the prompt a task notification raises clears the job it just ended
 test('Only your own prompt clears ended jobs and blocks', async ($, on) => {
   world(on, {})

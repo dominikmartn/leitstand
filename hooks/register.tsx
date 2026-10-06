@@ -6,7 +6,7 @@ import type { Level } from './disk'
 import { DF, diskTarget, level, needsYou, parseDf } from './disk'
 import { DOT, loudMeter, loudScanner, loudStub, meter, scanner, SPIN } from './bars'
 import { hookBlock } from './blocks'
-import { applyEndings, backgroundId, elapsed, notifications, running, summary } from './jobs'
+import { applyEndings, backgroundId, elapsed, notifications, running, stopEnds, summary } from './jobs'
 
 const disk = atom({ plugin: 'leitstand', key: 'disk' } as const, null)
 const jobs = atom({ plugin: 'leitstand', key: 'jobs' } as const, [])
@@ -133,6 +133,16 @@ export const register: Register = on => {
     const isAgent = e.tool === 'Agent'
     const isBgBash = e.tool === 'Bash' && input.run_in_background === true
     if (e.agentId) return next(e)
+    if (e.tool === 'TaskStop') {
+      const ran = await next(e)
+      await noteBlock($, ran)
+      const id = String(input.task_id ?? input.shell_id ?? '')
+      if (id && stopEnds(ran as { deny?: string; isError?: boolean; text?: string })) {
+        const at = await $.clock.now()
+        await update($, jobs, list => applyEndings(list, [{ id, status: 'failed' }], at).list)
+      }
+      return ran
+    }
     if (!isAgent && !isBgBash) {
       const ran = await next(e)
       await noteBlock($, ran)

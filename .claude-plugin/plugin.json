@@ -1,6 +1,6 @@
 {
   "name": "leitstand",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A control room above your prompt: background agents and shells, disk space and context at a glance. Two themes, loud and quiet. /stand toggles the list.",
   "author": { "name": "Dominik Martin", "url": "https://x.com/dominikmartn" },
   "homepage": "https://github.com/dominikmartn/leitstand",
