@@ -22,8 +22,6 @@ declare module 'claude-code' {
       jobs: Job[]
       // null: the theme decides (loud shows the list, quiet folds it)
       open: boolean | null
-      now: number
-      frame: number
       diskSeen: 'ok' | 'warn' | 'bad'
       ctx: { tokens: number; window: number; pct: number } | null
       block: { hook: string; reason: string } | null

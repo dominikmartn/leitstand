@@ -4,15 +4,14 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Disk, Job } from '../types'
 import type { Level } from './disk'
 import { DF, diskTarget, level, needsYou, parseDf } from './disk'
-import { DOT, loudMeter, loudScanner, loudStub, meter, scanner, SPIN } from './bars'
+import { DOT, loudMeter, meter } from './bars'
 import { hookBlock } from './blocks'
-import { applyEndings, backgroundId, elapsed, notifications, running, stopEnds, summary } from './jobs'
+import { applyEndings, backgroundId, notifications, running, stopEnds } from './jobs'
 
 const disk = atom({ plugin: 'leitstand', key: 'disk' } as const, null)
+// Claude Code lists running jobs below the prompt itself; Leitstand only tracks them for the done sound
 const jobs = atom({ plugin: 'leitstand', key: 'jobs' } as const, [])
 const open = atom({ plugin: 'leitstand', key: 'open' } as const, null)
-const now = atom({ plugin: 'leitstand', key: 'now' } as const, 0)
-const frame = atom({ plugin: 'leitstand', key: 'frame' } as const, 0)
 const ctx = atom({ plugin: 'leitstand', key: 'ctx' } as const, null)
 const block = atom({ plugin: 'leitstand', key: 'block' } as const, null)
 const diskSeen = atom({ plugin: 'leitstand', key: 'diskSeen' } as const, 'ok')
@@ -24,8 +23,7 @@ const MEASURE_EVERY = 5 * 60 * 1000
 const LONG_MS = 60 * 1000
 // From here on the context row stands above the prompt and says "compact"
 const CTX_SHOW = 250_000
-// Two columns of 48 characters plus gap and Claude Code's own margin
-const TWO_COLS_MIN = 104
+const W = { label: 24, bar: 14, right: 8 }
 
 type Theme = 'loud' | 'quiet'
 const theme = async ($: EngineInterface): Promise<Theme> => ((await $.env.get('LEITSTAND_THEME'))?.trim() === 'quiet' ? 'quiet' : 'loud')
@@ -87,13 +85,6 @@ async function refreshDisk($: EngineInterface): Promise<void> {
   await measure($)
 }
 
-async function tick($: EngineInterface): Promise<void> {
-  // Clock for elapsed time, only while something runs
-  if (!running(await read($, jobs)).length) return
-  const t = await $.clock.now()
-  await update($, now, () => t)
-}
-
 // Done sound only after long work, so short answers stay silent. Played from the system, not shipped.
 const ding = async ($: EngineInterface) => {
   if ((await $.env.get('LEITSTAND_SOUND'))?.trim() === 'off') return
@@ -109,6 +100,18 @@ async function noteBlock($: EngineInterface, ran: unknown): Promise<void> {
   $.ui.toast(`${hit.hook} blocked · ${hit.reason}`)
 }
 
+// What stands above the prompt without being asked: a low disk, a hook block, a full context
+async function alerts($: EngineInterface) {
+  const d = await read($, disk)
+  const lv = level(d?.freeGb ?? null)
+  const diskNeeds = needsYou(lv, await read($, diskSeen))
+  const g = await read($, block)
+  const c0 = await read($, ctx)
+  const c = c0 && typeof c0 === 'object' ? c0 : null
+  const ctxHigh = c !== null && c.tokens >= CTX_SHOW
+  return { d, lv, diskNeeds, g, c, ctxHigh, any: diskNeeds || !!g || ctxHigh }
+}
+
 const HUMAN = new Set(['composer', 'bridge', 'sdk'])
 
 const fit = (t: string, w: number) => ([...t].length > w ? [...t].slice(0, w - 1).join('') + '…' : t.padEnd(w))
@@ -116,15 +119,10 @@ const kTok = (n: number) => (n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M`
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'stand', description: 'Toggle the list: what is running and what needs you' })
+    await $.command.register({ name: 'stand', description: 'Toggle the list: disk, context and what needs you' })
     void refreshDisk($)
     if ((await target($)).invalid) $.ui.toast(INVALID_HOST)
     $.clock.every(60 * 1000, () => void refreshDisk($))
-    $.clock.every(1000, () => void tick($))
-    // Spinner and scanner: only animate while something runs
-    $.clock.every(120, async () => {
-      if (running(await read($, jobs)).length > 0) await update($, frame, f => f + 1)
-    })
     return next(e)
   })
 
@@ -215,14 +213,14 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'stand' }, async $ => {
-    const wasOpen = (await read($, open)) ?? (await theme($)) === 'loud'
+    // loud opens by default, but shows nothing until something needs you: then the first /stand opens
+    const wasOpen = (await read($, open)) ?? ((await theme($)) === 'loud' && (await alerts($)).any)
     await update($, open, () => !wasOpen)
-    // Folding means seen: the disk warning goes quiet, ended jobs leave
+    // Folding means seen: the disk warning goes quiet
     if (wasOpen) {
       const lv = level((await read($, disk))?.freeGb ?? null)
       await update($, diskSeen, () => lv)
       await $.store.set(`disk-seen:${storeKey(await host($))}`, lv)
-      await update($, jobs, running)
     }
     else void measure($)
     return {}
@@ -231,37 +229,20 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const th = await theme($)
-    const all = await read($, jobs)
-    const live = running(all)
-    const ended = th === 'loud' ? all.filter(j => j.status !== 'running') : []
-    const d = await read($, disk)
     const explicit = await read($, open)
     const isOpen = explicit ?? th === 'loud'
-    const f = await read($, frame)
-    const t = (await read($, now)) || (await $.clock.now())
     const hostName = await host($)
-    const lv = level(d?.freeGb ?? null)
-    const diskNeeds = needsYou(lv, await read($, diskSeen))
-    const s = summary([...live, ...ended], diskNeeds)
-    const g = await read($, block)
-    const c0 = await read($, ctx)
-    const c = c0 && typeof c0 === 'object' ? c0 : null
-    const ctxHigh = c !== null && c.tokens >= CTX_SHOW
-    const active = s.running + s.done + s.needs > 0 || !!g || ctxHigh
-    if (!active && explicit !== true) return next(e)
+    const { d, lv, diskNeeds, g, c, ctxHigh, any } = await alerts($)
+    if (!any && explicit !== true) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const loud = th === 'loud'
-    const spin = SPIN[f % SPIN.length]
     const diskColor = lv === 'bad' ? C.bad : lv === 'warn' ? C.warn : C.clay
 
     // loud shows the disk whenever the list is up; quiet only once it runs low
     const diskShown = !!d && (d.pct === null ? !!d.error : loud || lv !== 'ok')
     const ctxShown = c !== null && (!loud || ctxHigh || explicit === true)
-    const listCount = isOpen ? Math.max(live.length + ended.length, 1) + (diskShown ? 1 : 0) + (ctxShown ? 1 : 0) : 0
-    const twoCols = listCount >= 4 && e.props.bodyColumns >= TWO_COLS_MIN
-    const W = twoCols ? { label: 18, bar: 10, right: 6 } : { label: 24, bar: 14, right: 8 }
-    const diskName = twoCols ? (hostName ?? 'disk') : hostName ? `${hostName} disk` : 'disk'
+    const diskName = hostName ? `${hostName} disk` : 'disk'
 
     const Track = ({ s: str }: { s: string }) => <Text color={C.track} dimColor>{str}</Text>
     const Hint = () => <Text dimColor>{'     /stand'}</Text>
@@ -276,20 +257,6 @@ export const register: Register = on => {
       </Box>
     )
     const empty = <Track s={(loud ? DOT : '─').repeat(W.bar)} />
-
-    const jobRows = live.map((j, i) => {
-      const [pre, comet, post] = (loud ? loudScanner : scanner)(f + i * 5, W.bar)
-      const bar = [<Track s={pre} />, <Text color={C.clay}>{comet}</Text>, <Track s={post} />]
-      return <Row mark={spin} color={C.clay} state="running" label={j.label} bar={bar} right={elapsed(t - j.startedAt)} />
-    })
-    const endedRows = ended.map(j => {
-      if (j.status === 'done') {
-        const [body] = loudMeter(100, W.bar)
-        return <Row mark="✓" color={C.ok} state="done" label={j.label} bar={<Text color={C.ok}>{body}</Text>} right={elapsed((j.endedAt ?? t) - j.startedAt)} />
-      }
-      const [stub, track] = loudStub(W.bar)
-      return <Row mark="!" color={C.bad} state="needs you" label={j.label} bar={[<Text color={C.bad}>{stub}</Text>, <Text color={C.bad} dimColor>{track}</Text>]} right="failed" bold />
-    })
 
     // Seen means calm: no "needs you", just the numbers in the warning color
     const diskRow = (hint = false) => !d || !diskShown ? null : d.pct === null
@@ -309,12 +276,9 @@ export const register: Register = on => {
       return <Row mark=" " color={color} state={ctxHigh ? 'compact' : 'context'} label={`${kTok(c.tokens)} of ${kTok(c.window)}`} bar={[<Text color={color}>{body}</Text>, <Track s={rest} />]} right={`${c.pct} %`} hint={hint} />
     })()
 
-    const idle = <Row mark="·" color={C.track} state="idle" label="nothing running" bar={empty} right="" />
-    const openRows = isOpen ? [live.length + ended.length === 0 ? idle : null, ...jobRows, ...endedRows, diskRow(), ctxRow()].filter(Boolean) : []
-    const half = Math.ceil(openRows.length / 2)
-    const list = isOpen && (twoCols
-      ? <Box columnGap={4}><Box flexDirection="column">{openRows.slice(0, half)}</Box><Box flexDirection="column">{openRows.slice(half)}</Box></Box>
-      : openRows)
+    const idle = <Row mark="·" color={C.track} state="idle" label="nothing needs you" bar={empty} right="" />
+    const openRows = isOpen ? [diskRow(), ctxRow()].filter(Boolean) : []
+    const list = isOpen && (openRows.length ? openRows : idle)
 
     const blockLine = (hint: boolean) => g && (
       <Box>
@@ -327,47 +291,32 @@ export const register: Register = on => {
     )
 
     if (loud) {
-      // The footer counts everything, folded or open
-      const parts: unknown[] = []
-      if (s.running) parts.push(<Text><Text color={C.clay}>{spin} </Text>{s.running} running</Text>)
-      if (s.done) parts.push(<Text><Text color={C.ok}>✓ </Text>{s.done} done</Text>)
-      if (s.needs) parts.push(<Text color={C.warn} bold>! {s.needs} needs you</Text>)
-      const joined = parts.flatMap((p, i) => (i ? [<Text dimColor>{'  ·  '}</Text>, p] : [p]))
-      // Nothing to count: /stand hangs on the last row instead of standing alone
-      const hang = parts.length ? null : g ? 'block' : !isOpen && ctxHigh ? 'ctx' : null
+      // The footer counts what needs you, folded or open; without it /stand hangs on the last row
+      const hang = diskNeeds ? null : g ? 'block' : !isOpen && ctxHigh ? 'ctx' : null
       return (
         <Box flexDirection="column">
           {list}
           {!isOpen && ctxHigh && ctxRow(hang === 'ctx')}
           {blockLine(hang === 'block')}
-          {parts.length > 0 && (
+          {diskNeeds && (
             <Box>
-              {joined as never}
+              <Text color={C.warn} bold>! 1 needs you</Text>
               <Hint />
             </Box>
           )}
-          {!parts.length && !hang && <Text dimColor>/stand</Text>}
+          {!diskNeeds && !hang && <Text dimColor>/stand</Text>}
         </Box>
       )
     }
 
-    // quiet: the open list already shows every row, so no footer repeats it
-    const parts: unknown[] = []
-    if (!isOpen && s.running) parts.push(<Text><Text color={C.clay}>{spin} </Text>{s.running} running</Text>)
-    // Without a footer, /stand hangs on the last row
-    const last = isOpen || parts.length ? null : g ? 'block' : ctxHigh ? 'ctx' : 'disk'
+    // quiet: no footer, /stand hangs on the last row
+    const last = isOpen ? null : g ? 'block' : ctxHigh ? 'ctx' : 'disk'
     return (
       <Box flexDirection="column">
         {list}
         {diskNeeds && !isOpen && diskRow(last === 'disk')}
         {ctxHigh && !isOpen && ctxRow(last === 'ctx')}
         {blockLine(last === 'block')}
-        {parts.length > 0 && (
-          <Box>
-            {parts as never}
-            <Hint />
-          </Box>
-        )}
       </Box>
     )
   })

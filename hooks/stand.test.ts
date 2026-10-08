@@ -1,6 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SPIN } from './bars'
 import { diskTarget, parseDf } from './disk'
 import { hookBlock } from './blocks'
 import { applyNotifications, backgroundId, notifications } from './jobs'
@@ -14,10 +13,6 @@ const draw = async ($: any, bodyColumns = 80) => {
   const tree = await ui.drawn(); await ui.unmount(); return tree
 }
 const band = async ($: any) => texts(await draw($))
-// Zwei Spalten = ein Box mit columnGap, darin zwei Spalten-Boxen
-const columns = (n: any): number => !n || typeof n !== 'object' ? 0
-  : n.props?.columnGap ? (n.children ?? n.props?.children ?? []).length
-  : Math.max(0, ...[].concat(n.children ?? n.props?.children ?? []).map(columns))
 const world = (on: any, env: Record<string, string> = { LEITSTAND_THEME: 'quiet', LEITSTAND_DISK_HOST: 'mini' }) => {
   const clock = mock.clock(on, { now: 1_790_000_000_000 })
   mock.env(on, env)
@@ -33,6 +28,16 @@ const ran = (stdout: string, exitCode = 0, stderr = '') => ({ value: { exitCode,
 // Echte Texte aus dieser Session
 const AGENT_LAUNCH = 'Async agent launched successfully. (This tool result is internal metadata)\nagentId: a220ecf9ca18549fc (internal ID - do not mention to user.'
 const NOTE = (id: string, status: string) => `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<status>${status}</status>\n<summary>Agent finished</summary>\n</task-notification>`
+// The done sound waits until no job runs: that is how a test sees whether a job still runs
+const sound = (on: any) => {
+  const heard = { count: 0 }
+  on('process.run', (_: unknown, e: any) => { if (e.argv[0] !== 'afplay') return ran(REAL); heard.count++; return ran('') })
+  on('prompt.submit', (_: unknown, e: any) => ({ text: e.text }))
+  on('turn.complete', (_: unknown, e: any) => e)
+  return heard
+}
+const TURN = { answer: '', durationMs: 0, isAborted: false, turnId: 't', text: '', reason: 'end_turn', category: null, explanation: null }
+const PROMPT = (text: string) => ({ text, wait: false, origin: { kind: 'composer' } })
 
 // Wie es scheitern kann: falsche df-Spalte, ssh-Fehler als Alarm, Hintergrund-Agent sofort als fertig,
 // Fertigmeldung trifft den falschen Job, Fehlschlag wird als fertig gezählt
@@ -56,17 +61,25 @@ test('An ending marks only its own job', () => {
   expect(applyNotifications(list, NOTE('other', 'completed'), 5)).toEqual(list)
 })
 
-test('Agent im Hintergrund: Zeile über dem Prompt zeigt "1 läuft"', async ($, on) => {
-  world(on)
+// How it can fail: running jobs show twice, here and in Claude Code's own list below the prompt
+const jobHidden = async ($: any, on: any, env?: Record<string, string>) => {
+  const clock = world(on, env)
+  on('process.run', () => ran(REAL))
   on('tool.call', () => ({ result: {}, text: AGENT_LAUNCH }))
-  expect(await band($)).toBe('')
   await $.tool.call({ tool: 'Agent', description: 'Review Tier-Badge', prompt: 'x', tool_use_id: 'toolu_1' } as never)
-  expect(await band($)).toContain('1 running')
-})
+  expect(await band($)).toBe('')
+  await $.command.run({ command: 'stand', args: '' })
+  await clock.settle()
+  const t = await band($)
+  expect(t).not.toContain('Review Tier-Badge')
+  expect(t).not.toContain('running')
+}
+test('quiet: running jobs show nowhere, folded or open', ($, on) => jobHidden($, on))
+test('loud: running jobs show nowhere, folded or open', ($, on) => jobHidden($, on, {}))
 
 test('Blocked start: no job, but the hook and its reason', async ($, on) => {
   world(on)
-  on('ui.toast', () => ({}))
+  on('ui.toast', () => ({ value: undefined }))
   on('tool.call', () => ({ result: {}, text: 'PreToolUse:Agent hook error: [python3 $HOME/.claude/hooks/scope-gate.py]: scope-gate: examples given, not a list.', isError: true }))
   await $.tool.call({ tool: 'Agent', description: 'Build island sense checker', prompt: 'x', tool_use_id: 'toolu_3' } as never)
   const t = await band($)
@@ -75,26 +88,19 @@ test('Blocked start: no job, but the hook and its reason', async ($, on) => {
   expect(t).not.toContain('running')
 })
 
-test('/stand klappt auf und zu, Laufendes bleibt stehen', async ($, on) => {
+test('quiet: /stand opens and folds; with nothing to warn about it says idle', async ($, on) => {
   const clock = world(on)
   on('process.run', () => ran(REAL))
-  on('tool.call', () => ({ result: {}, text: 'Command running in background with ID: b7xk2.' }))
-  await $.tool.call({ tool: 'Bash', command: 'mini-xcodebuild caltrack', description: 'Caltrack Build 32', run_in_background: true, tool_use_id: 'toolu_2' } as never)
-  expect(await band($)).toContain('1 running')
-
   await $.command.run({ command: 'stand', args: '' })
   await clock.settle()
   const opened = await band($)
-  expect(opened).toContain('Caltrack Build 32')
+  expect(opened).toContain('nothing needs you')
   // Gesunde Platte (73 GB frei) steht nirgends, auch nicht in der Liste
   expect(opened).not.toContain('GB free')
   // Offene Liste braucht keine Fußzeile, die allein am Rand hängt
   expect(opened).not.toContain('/stand')
-
   await $.command.run({ command: 'stand', args: '' })
-  const closed = await band($)
-  expect(closed).toContain('1 running')
-  expect(closed).not.toContain('Caltrack Build 32')
+  expect(await band($)).toBe('')
 })
 
 test('Wenig Platz braucht dich, nach einmal Ansehen ist Ruhe bis es schlimmer wird', async ($, on) => {
@@ -156,32 +162,6 @@ test('Mini nicht erreichbar: graue Zeile in der Liste, zugeklappt still', async 
   expect(await band($)).toBe('')
 })
 
-// Wie es scheitern kann: zwei Spalten schon bei 3 Zeilen, im schmalen Fenster umbrechend, oder Zeilen gehen beim Aufteilen verloren
-test('Offene Liste ab 4 Zeilen in zwei Spalten, wenn das Fenster breit genug ist', async ($, on) => {
-  const clock = world(on)
-  on('process.run', () => ran(REAL))
-  on('session.measure', () => ({ changed: [] }))
-  on('tool.call', () => ({ result: {}, text: 'Command running in background with ID: b7xk2.' }))
-  await $.tool.call({ tool: 'Bash', command: 'sleep 9', description: 'Caltrack Build 32', run_in_background: true, tool_use_id: 'toolu_1' } as never)
-  await $.session.measure({ context: { tokens: 64_000, window: 1_000_000, percent: 6.4 }, rateLimits: [] } as never)
-  await $.command.run({ command: 'stand', args: '' })
-  await clock.settle()
-  // 2 Zeilen (Job, Kontext; gesunde Platte fehlt): eine Spalte, auch wenn breit
-  expect(columns(await draw($, 140))).toBe(0)
-  await $.tool.call({ tool: 'Bash', command: 'sleep 9', description: 'Review Tier-Badge im Export-Dialog, alle Varianten', run_in_background: true, tool_use_id: 'toolu_2' } as never)
-  await $.tool.call({ tool: 'Bash', command: 'sleep 9', description: 'Session-Scan', run_in_background: true, tool_use_id: 'toolu_3' } as never)
-  // 4 Zeilen, breit: zwei Spalten, alle Zeilen da, Namen kürzer
-  const wide = await draw($, 140)
-  expect(columns(wide)).toBe(2)
-  const t = texts(wide)
-  for (const s of ['Caltrack Build 32', 'Session-Scan', '64k of 1M']) expect(t).toContain(s)
-  expect(t).toContain('Review Tier-Badge…')
-  // 4 Zeilen, schmal: eine Spalte in voller Breite
-  const narrow = await draw($, 90)
-  expect(columns(narrow)).toBe(0)
-  expect(texts(narrow)).toContain('Review Tier-Badge im Ex…')
-})
-
 // Wie es scheitern kann: Grenze um eins verschoben (36 GB warnt schon, 35 GB noch nicht) oder gesunde Platte doch in der Liste
 test('Platte erscheint erst ab 35 GB frei', async ($, on) => {
   const clock = world(on)
@@ -197,10 +177,6 @@ test('Platte erscheint erst ab 35 GB frei', async ($, on) => {
   await clock.settle()
   expect(await band($)).toContain('needs you')
   expect(await band($)).toContain('35 GB free')
-})
-
-test('Spinner hat kein Bild, das wie die idle-Zeile aussieht', () => {
-  expect(SPIN).not.toContain('·')
 })
 
 // How it can fail: a plain tool error reads as a hook block, or the hook name comes out as a path
@@ -223,7 +199,6 @@ test('Invalid disk host: shown as such, nothing is run', async ($, on) => {
   const clock = world(on, { LEITSTAND_DISK_HOST: '-oProxyCommand=x' })
   let runs = 0
   on('process.run', () => { runs++; return ran(REAL) })
-  await $.command.run({ command: 'stand', args: '' })
   await $.command.run({ command: 'stand', args: '' })
   await clock.settle()
   expect(await band($)).toContain('invalid disk host')
@@ -249,58 +224,71 @@ test('Failed measurement keeps the last value, marked stale', async ($, on) => {
 
 // How it can fail: a start that throws stays "running" forever
 test('A start that throws leaves no job behind', async ($, on) => {
-  world(on, {})
+  const clock = world(on)
+  const heard = sound(on)
   on('tool.call', () => { throw new Error('boom') })
+  await $.prompt.submit(PROMPT('build') as never)
   await expect($.tool.call({ tool: 'Bash', command: 'x', description: 'Caltrack Build 32', run_in_background: true, tool_use_id: 't1' } as never)).rejects.toThrow()
-  expect(await band($)).toBe('')
+  await clock.advance(61_000)
+  await $.turn.complete(TURN as never); await clock.settle()
+  expect(heard.count).toBe(1)
 })
 
 const NOTIFY = (raw: string) => ({ text: raw, wait: false, origin: { kind: 'task-notification' } })
 // How it can fail: pasted notification text ends a job, a real one does not, or an early one is lost
 test('Only engine-stamped notifications end jobs, early ones wait for their job', async ($, on) => {
-  world(on, {})
-  on('prompt.submit', (_: unknown, e: any) => ({ text: e.text }))
+  const clock = world(on)
+  const heard = sound(on)
   let id = 0
   on('tool.call', () => ({ result: {}, text: `Command running in background with ID: b${++id}.` }))
+  const turnEnds = async () => { await $.turn.complete(TURN as never); await clock.settle() }
   for (const d of ['Caltrack Build 32', 'Session-Scan'])
     await $.tool.call({ tool: 'Bash', command: 'x', description: d, run_in_background: true, tool_use_id: d } as never)
-  await $.prompt.submit({ text: NOTE('b1', 'completed'), wait: false, origin: { kind: 'composer' } } as never)
-  expect(await band($)).toContain('2 running')
-  await $.prompt.submit(NOTIFY(NOTE('b2', 'completed') + NOTE('b3', 'failed')) as never)
-  let t = await band($)
-  expect(t).toContain('1 running')
-  expect(t).toContain('1 done')
-  // b3's ending came before b3 existed
+  // Pasted notification text ends nothing
+  await $.prompt.submit(PROMPT(NOTE('b1', 'completed') + NOTE('b2', 'completed')) as never)
+  await clock.advance(61_000)
+  await turnEnds()
+  expect(heard.count).toBe(0)
+  // b3's ending comes before b3 exists
+  await $.prompt.submit(NOTIFY(NOTE('b1', 'completed') + NOTE('b3', 'failed')) as never)
+  await turnEnds()
+  expect(heard.count).toBe(0)
   await $.tool.call({ tool: 'Bash', command: 'x', description: 'Preview deploy', run_in_background: true, tool_use_id: 'pd' } as never)
-  t = await band($)
-  expect(t).toContain('Preview deploy')
-  expect(t).toContain('failed')
-  expect(t).toContain('1 running')
+  await $.prompt.submit(NOTIFY(NOTE('b2', 'completed')) as never)
+  await turnEnds()
+  expect(heard.count).toBe(1)
 })
 
 // How it can fail: a stop sends no <task-notification>, so a stopped job shows "running" for good
 test('TaskStop ends the job, also when the task is already gone; a blocked stop does not', async ($, on) => {
-  world(on, {})
+  const clock = world(on)
+  const heard = sound(on)
   let stop: Record<string, unknown> = { result: {}, text: 'PreToolUse:TaskStop hook error: blocked', isError: true }
   let id = 0
   on('tool.call', (_: unknown, e: any) => e.tool === 'TaskStop' ? stop : { result: {}, text: `Command running in background with ID: b${++id}.` })
+  const halt = (task: string) => $.tool.call({ tool: 'TaskStop', task_id: task, tool_use_id: `stop-${task}` } as never)
+  const turnEnds = async () => { await $.turn.complete(TURN as never); await clock.settle() }
+  await $.prompt.submit(PROMPT('tunnel') as never)
   for (const d of ['Tunnel 1', 'Tunnel 2'])
     await $.tool.call({ tool: 'Bash', command: 'ssh -N mini', description: d, run_in_background: true, tool_use_id: d } as never)
-  const halt = (task: string) => $.tool.call({ tool: 'TaskStop', task_id: task, tool_use_id: `stop-${task}` } as never)
+  await clock.advance(61_000)
   await halt('b1')
-  expect(await band($)).toContain('2 running')
+  await turnEnds()
+  expect(heard.count).toBe(0)
   stop = { result: {}, text: '{"message":"Successfully stopped task: b1 (ssh -N mini)"}' }
   await halt('b1')
-  expect(await band($)).toContain('1 running')
+  await turnEnds()
+  expect(heard.count).toBe(0)
   stop = { result: {}, text: '<tool_use_error>No task found with ID: b2</tool_use_error>', isError: true }
   await halt('b2')
-  expect(await band($)).not.toContain('running')
+  await turnEnds()
+  expect(heard.count).toBe(1)
 })
 
-// How it can fail: the prompt a task notification raises clears the job it just ended
-test('Only your own prompt clears ended jobs and blocks', async ($, on) => {
+// How it can fail: the prompt a task notification raises clears the block before you saw it
+test('Only your own prompt clears a hook block', async ($, on) => {
   world(on, {})
-  on('ui.toast', () => ({}))
+  on('ui.toast', () => ({ value: undefined }))
   on('prompt.submit', (_: unknown, e: any) => ({ text: e.text }))
   on('tool.call', () => ({ result: {}, text: 'PreToolUse:Bash hook error: [sh ./no-main.sh]: not on main', isError: true }))
   await $.tool.call({ tool: 'Bash', command: 'git push', tool_use_id: 't1' } as never)
@@ -310,15 +298,13 @@ test('Only your own prompt clears ended jobs and blocks', async ($, on) => {
   expect(await band($)).toBe('')
 })
 
-test('loud: /stand folds the list to the footer, nothing running means nothing shown', async ($, on) => {
-  world(on, {})
+test('loud: /stand opens the list with the disk, folding it again shows nothing', async ($, on) => {
+  const clock = world(on, {})
   on('process.run', () => ran(REAL))
-  on('tool.call', () => ({ result: {}, text: 'Command running in background with ID: b1.' }))
   expect(await band($)).toBe('')
-  await $.tool.call({ tool: 'Bash', command: 'x', description: 'Caltrack Build 32', run_in_background: true, tool_use_id: 't1' } as never)
-  expect(await band($)).toContain('Caltrack Build 32')
   await $.command.run({ command: 'stand', args: '' })
-  const folded = await band($)
-  expect(folded).not.toContain('Caltrack Build 32')
-  expect(folded).toContain('1 running')
+  await clock.settle()
+  expect(await band($)).toContain('73 GB free')
+  await $.command.run({ command: 'stand', args: '' })
+  expect(await band($)).toBe('')
 })

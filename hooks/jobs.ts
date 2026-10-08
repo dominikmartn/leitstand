@@ -18,17 +18,6 @@ export function notifications(raw: string): { id: string; status: Job['status'] 
   return out
 }
 
-export function elapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}h` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-}
-
-export function summary(jobs: Job[], diskNeeds: boolean) {
-  const count = (s: Job['status']) => jobs.filter(j => j.status === s).length
-  const failed = count('failed')
-  return { running: count('running'), done: count('done'), failed, needs: failed + (diskNeeds ? 1 : 0) }
-}
-
 // A TaskStop sends no <task-notification>: stopped, or already gone, means the job is not running.
 // A hook that blocks the stop leaves it running.
 export function stopEnds(ran: { deny?: string; isError?: boolean; text?: string }): boolean {
